@@ -4,15 +4,19 @@
 #   live-oracle  did the *OS* break it?    real noisy runner, diffed against ss/lsof
 #   client-ts    did the reader drift?     tsc + vitest, no host, no binary
 #
-# The first two run on linux and darwin, because the whole point of the tool is
-# that one binary answers the same questions where the two kernels draw
-# different lines. They are separate jobs so branch protection can require the
-# hermetic pair without requiring a lane whose input is a live host.
+# All three run on linux and darwin, because the whole point of the tool is that
+# one binary answers the same questions where the two kernels draw different
+# lines — and that holds for the reader too: the client spawns a child, so its
+# tests write a real executable, chmod it, and assert on the errno the OS hands
+# back. Those are the semantics that differ. A one-platform reader lane would
+# be the only place in this repo that assumed the two kernels agree.
 #
-# client-ts runs on one platform only: it parses osfacts' output, it never asks
-# the OS anything. Its toolchain comes from the same npins pin as the rest, via
-# this flake's devShell — zero flake inputs, and pure (no `--impure`), because
-# npins fetches by hash.
+# They are separate jobs so branch protection can require the sandboxed lanes
+# without requiring one whose input is a live host.
+#
+# Toolchains come from the same npins pin as the packages, via this flake's
+# devShells — zero flake inputs, and pure (no `--impure`), because npins fetches
+# by hash.
 #
 # Third-party actions are pinned to a commit, not a tag: a tag is mutable, and
 # a mutable ref in a workflow with repository access is a supply-chain hole.
@@ -63,8 +67,12 @@ jobs:
       - run: bash scripts/live-oracle.sh
 
   client-ts:
-    name: client-ts
-    runs-on: ubuntu-latest
+    name: client-ts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: cachix/install-nix-action@b4b293eae0b79aac8a161bb32925a5508c9cca93 # v31

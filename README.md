@@ -230,7 +230,7 @@ Former `@kolu/port-scan` is dead: protocol here, policy in padi, `PortInfo` fold
 ## Testing
 
 Three lanes. Three questions. Every push and pull request
-(`.github/workflows/ci.yml`). Lanes 1 and 2 run on linux **and** darwin.
+(`.github/workflows/ci.yml`), each on linux **and** darwin.
 
 ### Lane 1 — did *we* break osfacts?
 
@@ -254,8 +254,10 @@ Three lanes. Three questions. Every push and pull request
 
 ### Lane 3 — did the reader drift from the writer?
 
-- `client-ts/` (`osfacts-client`): `tsc --noEmit` + 39 vitest tests, ubuntu only.
-- No host, no binary, no OS question — it parses bytes, so one platform proves it.
+- `client-ts/` (`osfacts-client`): `tsc --noEmit` + 39 vitest tests, both platforms.
+- Not only a parser: the client spawns a child, so the suite writes a real
+  executable, `chmod`s it, and pins the errno the OS returns. Same reason as
+  lanes 1 and 2 — the kernels disagree, so both get asked.
 - `facets.test.ts` reads the repo-root `facets.json`, the same document
   `tests/v2_contract.rs` pins to the `Facet` enum. Add a facet in Rust without
   adding it here and this lane goes red — not a consumer's runtime parse.
