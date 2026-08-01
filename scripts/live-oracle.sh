@@ -25,17 +25,11 @@ echo "live-oracle: binary=$OSFACTS_BIN" >&2
 "$OSFACTS_BIN" snapshot --procs >/dev/null  # fail fast if the binary is broken
 
 export OSFACTS_LIVE=1
-# cargo test drives the harness=false cucumber binary. Dev-deps come from
-# the local Cargo.lock; the hermetic gate is nix/nextest, not this script.
-# Always use the repo-pinned nixpkgs toolchain — ambient cargo/rustc can miss
-# link deps (darwin `-liconv`) even when `cargo` is on PATH.
-# `nix shell` alone puts bins on PATH but does NOT set library search paths,
-# so rustc still fails with "library not found for -liconv" unless we pin
-# LIBRARY_PATH / RUSTFLAGS to the same pin's libiconv.
-iconv_lib="$(nix eval --impure --raw --expr \
-  'let pkgs = import ./nix/nixpkgs.nix {}; in "${pkgs.libiconv}/lib"')"
-echo "live-oracle: cargo test via repo-pinned nixpkgs (libiconv=$iconv_lib)" >&2
-# Relative path is from the repo root (cwd above).
-nix shell --impure \
-  --expr 'let pkgs = import ./nix/nixpkgs.nix {}; in [ pkgs.cargo pkgs.rustc pkgs.stdenv.cc pkgs.libiconv ]' \
-  -c bash -c "export LIBRARY_PATH=\"${iconv_lib}\${LIBRARY_PATH:+:\$LIBRARY_PATH}\"; export RUSTFLAGS=\"-L ${iconv_lib} \${RUSTFLAGS:-}\"; cargo test --test live_oracle"
+# cargo test drives the harness=false cucumber binary. Dev-deps come from the
+# local Cargo.lock; the hermetic gate is nix/nextest, not this script. The
+# toolchain is this flake's devShell — the same pin the package builds against,
+# never an ambient cargo/rustc, which can miss link deps (darwin `-liconv`)
+# even when `cargo` is on PATH. The devShell's cc wrapper supplies that link
+# path, so nothing here sets LIBRARY_PATH or RUSTFLAGS by hand.
+echo "live-oracle: cargo test via the flake devShell" >&2
+nix develop "$root" -c cargo test --test live_oracle

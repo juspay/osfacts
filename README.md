@@ -229,8 +229,8 @@ Former `@kolu/port-scan` is dead: protocol here, policy in padi, `PortInfo` fold
 
 ## Testing
 
-Two lanes. Two questions. Both run on linux **and** darwin for every push and
-pull request (`.github/workflows/ci.yml`).
+Three lanes. Three questions. Every push and pull request
+(`.github/workflows/ci.yml`), each on linux **and** darwin.
 
 ### Lane 1 — did *we* break osfacts?
 
@@ -251,6 +251,23 @@ pull request (`.github/workflows/ci.yml`).
 - Gherkin scenarios (`cucumber`).
 - Reads the oracle's spelling, not a tidied one: `ss` writes a device-bound listener as `127.0.0.53%lo`, and a row this lane cannot parse is a row it silently does not have.
 - Live reds block merge on purpose. Advisory reds train people to skip them. OS drift under the tool is exactly when you stop shipping.
+
+### Lane 3 — did the reader drift from the writer?
+
+- `client-ts/` (`osfacts-client`): `tsc --noEmit` + 39 vitest tests, both platforms.
+- Not only a parser: the client spawns a child, so the suite writes a real
+  executable, `chmod`s it, and pins the errno the OS returns. Same reason as
+  lanes 1 and 2 — the kernels disagree, so both get asked.
+- `facets.test.ts` reads the repo-root `facets.json`, the same document
+  `tests/v2_contract.rs` pins to the `Facet` enum. Add a facet in Rust without
+  adding it here and this lane goes red — not a consumer's runtime parse.
+- Node + pnpm from the repo's npins pin. `pnpm install --frozen-lockfile`
+  against `client-ts/pnpm-lock.yaml`.
+
+```sh
+nix shell --impure --expr 'let pkgs = import ./nix/nixpkgs.nix {}; in [ pkgs.nodejs pkgs.pnpm ]' \
+  -c bash -c 'cd client-ts && pnpm install && pnpm run typecheck && pnpm run test:unit'
+```
 
 ---
 
