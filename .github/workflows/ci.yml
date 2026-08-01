@@ -1,0 +1,39 @@
+# Lane 1 only — "did *we* break osfacts?" `nix build` runs the hermetic suite
+# in checkPhase (cargo-nextest, process-per-test, per-test timeouts), on both
+# platforms, because one binary answering the same questions where two kernels
+# draw different lines is the whole point.
+#
+# Deferred to a follow-up PR, because both need edits this import deliberately
+# does not make:
+#
+#   lane 2 (live-host oracle)  scripts/live-oracle.sh still resolves the kolu
+#                              tree (../nix/nixpkgs.nix, `.#osfacts` at the
+#                              monorepo root). It passes on a macos runner and
+#                              disagrees with `ss` on an ubuntu one — see the
+#                              PR description.
+#   client-ts                  client-ts/tsconfig.json still extends the
+#                              monorepo's ../../tsconfig.base.json, and has no
+#                              lockfile of its own.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hermetic:
+    name: hermetic (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - run: nix build .#osfacts --no-link -L
