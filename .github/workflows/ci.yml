@@ -1,15 +1,17 @@
-# Two lanes, two questions — the split the README describes.
+# Three lanes, three questions — the split the README describes.
 #
 #   hermetic     did *we* break osfacts?   nix sandbox, self-referential fixtures
 #   live-oracle  did the *OS* break it?    real noisy runner, diffed against ss/lsof
+#   client-ts    did the reader drift?     tsc + vitest, no host, no binary
 #
-# Both run on linux and darwin, because the whole point of the tool is that one
-# binary answers the same questions where the two kernels draw different lines.
-# They are separate jobs so branch protection can require the hermetic pair
-# without requiring a lane whose input is a live host.
+# The first two run on linux and darwin, because the whole point of the tool is
+# that one binary answers the same questions where the two kernels draw
+# different lines. They are separate jobs so branch protection can require the
+# hermetic pair without requiring a lane whose input is a live host.
 #
-# Still deferred: the TS client (client-ts/tsconfig.json extends the kolu
-# monorepo's base config and has no lockfile of its own).
+# client-ts runs on one platform only: it parses osfacts' output, it never asks
+# the OS anything. Node and pnpm come from the same npins pin as the rest — this
+# flake has zero inputs and keeps them.
 name: CI
 
 on:
@@ -49,3 +51,18 @@ jobs:
       # a separate job from `hermetic` for exactly that reason — the sandbox
       # shuts the world out, and this lane IS the world.
       - run: bash scripts/live-oracle.sh
+
+  client-ts:
+    name: client-ts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      # Same npins pin as every other lane — no flake input, no setup-node.
+      # `--impure` because the expr reads ./nix/nixpkgs.nix by relative path;
+      # this is the idiom scripts/live-oracle.sh already uses.
+      - name: typecheck + unit tests
+        run: |
+          nix shell --impure \
+            --expr 'let pkgs = import ./nix/nixpkgs.nix {}; in [ pkgs.nodejs pkgs.pnpm ]' \
+            -c bash -c 'cd client-ts && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm run test:unit'
