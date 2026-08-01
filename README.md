@@ -229,7 +229,8 @@ Former `@kolu/port-scan` is dead: protocol here, policy in padi, `PortInfo` fold
 
 ## Testing
 
-Two lanes. Two questions. Both block merge.
+Two lanes. Two questions. Both run on linux **and** darwin for every push and
+pull request (`.github/workflows/ci.yml`).
 
 ### Lane 1 — did *we* break osfacts?
 
@@ -246,8 +247,9 @@ Two lanes. Two questions. Both block merge.
   `listeners` crate plus a `ps` process snapshot (Darwin). Darwin takes a
   second `ps` snapshot after the probe and accepts a missing PID only when
   that process retired or was reused, confirmed by `proc` returning `ESRCH`.
-- CI recipe `ci::osfacts-live` — **not** a phase of `nix build`. Sandbox shuts the world out; this lane *is* the world.
-- Gherkin scenarios (`cucumber`), same idiom as kolu e2e.
+- Its own CI job (`scripts/live-oracle.sh`) — **not** a phase of `nix build`. Sandbox shuts the world out; this lane *is* the world.
+- Gherkin scenarios (`cucumber`).
+- Reads the oracle's spelling, not a tidied one: `ss` writes a device-bound listener as `127.0.0.53%lo`, and a row this lane cannot parse is a row it silently does not have.
 - Live reds block merge on purpose. Advisory reds train people to skip them. OS drift under the tool is exactly when you stop shipping.
 
 ---
