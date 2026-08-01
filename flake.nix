@@ -1,18 +1,17 @@
-# osfacts's own flake, so it can be run — and later moved — on its own:
+# osfacts's own flake, now that the directory has moved and stands on its own:
 #
-#     nix run ./osfacts            # this flake
-#     nix run .#osfacts            # the same binary, from the root flake
+#     nix run .#osfacts            # the binary
 #
-# ZERO inputs. It reuses the repository's npins-backed nixpkgs through
-# nix/each-system.nix. The build itself lives in ./default.nix; both this
-# flake and the root flake import that one definition, so they can never
-# build two osfacts. The extraction gap (when this directory becomes its
-# own repo) is: give this flake its own nixpkgs pin and drop the
-# relative import — the package definition does not change.
+# ZERO inputs, still. The nixpkgs it builds against is npins-backed and reached
+# through nix/each-system.nix — no flake input, no flake.lock, one pin. The
+# build itself lives in ./default.nix, so this flake and a bare `nix-build` can
+# never build two osfacts. The extraction gap the kolu copy of this file named
+# is closed here: the pin came along with the directory (same revision), and
+# the import is no longer relative to a repository above.
 {
   outputs = { ... }:
     let
-      platform = import ../nix/each-system.nix;
+      platform = import ./nix/each-system.nix;
     in
     {
       packages = platform.withPkgs (pkgs:
