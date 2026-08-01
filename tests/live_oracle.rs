@@ -1,5 +1,5 @@
-//! Lane 2 — live-host oracle. Runs every full `/ci`, and gates like every
-//! other lane: `ci::osfacts-live` is branch-protected on both platforms.
+//! Lane 2 — live-host oracle. Its own CI job on both platforms, every push and
+//! pull request (`.github/workflows/ci.yml`).
 //!
 //! Invoked only when `OSFACTS_LIVE=1` (see `scripts/live-oracle.sh`). The
 //! binary under test is `$OSFACTS_BIN` (the nix-built osfacts), never a
@@ -1063,6 +1063,19 @@ fn split_host_port(s: &str) -> Option<(&str, u16)> {
 }
 
 fn parse_ss_addr(addr: &str) -> Option<CanonAddr> {
+    // `ss` appends the bound interface to an address whose socket is pinned to
+    // a device (`SO_BINDTODEVICE`), so a listener reads `127.0.0.53%lo`, not
+    // `127.0.0.53`. The zone is how the socket was bound, never part of the
+    // address the kernel matches on, and osfacts reports address BYTES — so it
+    // is dropped here rather than represented.
+    //
+    // This is not a corner case: it is systemd-resolved's stub resolver, i.e.
+    // every stock Ubuntu host including GitHub's runners. Failing to strip it
+    // made the whole row unparseable, and an unparseable oracle row is an
+    // ABSENT one — so osfacts reporting a listener the oracle "didn't have"
+    // read as osfacts inventing it. The tell was `127.0.0.54:53` (the proxy
+    // stub, not device-bound) surviving the same parse in the same output.
+    let addr = addr.split('%').next().unwrap_or(addr);
     if addr == "*" || addr == "0.0.0.0" {
         return Some(CanonAddr::AnyV4);
     }

@@ -1,19 +1,15 @@
-# Lane 1 only — "did *we* break osfacts?" `nix build` runs the hermetic suite
-# in checkPhase (cargo-nextest, process-per-test, per-test timeouts), on both
-# platforms, because one binary answering the same questions where two kernels
-# draw different lines is the whole point.
+# Two lanes, two questions — the split the README describes.
 #
-# Deferred to a follow-up PR, because both need edits this import deliberately
-# does not make:
+#   hermetic     did *we* break osfacts?   nix sandbox, self-referential fixtures
+#   live-oracle  did the *OS* break it?    real noisy runner, diffed against ss/lsof
 #
-#   lane 2 (live-host oracle)  scripts/live-oracle.sh still resolves the kolu
-#                              tree (../nix/nixpkgs.nix, `.#osfacts` at the
-#                              monorepo root). It passes on a macos runner and
-#                              disagrees with `ss` on an ubuntu one — see the
-#                              PR description.
-#   client-ts                  client-ts/tsconfig.json still extends the
-#                              monorepo's ../../tsconfig.base.json, and has no
-#                              lockfile of its own.
+# Both run on linux and darwin, because the whole point of the tool is that one
+# binary answers the same questions where the two kernels draw different lines.
+# They are separate jobs so branch protection can require the hermetic pair
+# without requiring a lane whose input is a live host.
+#
+# Still deferred: the TS client (client-ts/tsconfig.json extends the kolu
+# monorepo's base config and has no lockfile of its own).
 name: CI
 
 on:
@@ -37,3 +33,19 @@ jobs:
       - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v31
       - run: nix build .#osfacts --no-link -L
+
+  live-oracle:
+    name: live-oracle (${{ matrix.os }})
+    needs: hermetic
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      # A red here is honest: the host's own tools disagree with osfacts. It is
+      # a separate job from `hermetic` for exactly that reason — the sandbox
+      # shuts the world out, and this lane IS the world.
+      - run: bash scripts/live-oracle.sh
