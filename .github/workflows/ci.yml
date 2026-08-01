@@ -10,14 +10,24 @@
 # hermetic pair without requiring a lane whose input is a live host.
 #
 # client-ts runs on one platform only: it parses osfacts' output, it never asks
-# the OS anything. Node and pnpm come from the same npins pin as the rest — this
-# flake has zero inputs and keeps them.
+# the OS anything. Its toolchain comes from the same npins pin as the rest, via
+# this flake's devShell — zero flake inputs, and pure (no `--impure`), because
+# npins fetches by hash.
+#
+# Third-party actions are pinned to a commit, not a tag: a tag is mutable, and
+# a mutable ref in a workflow with repository access is a supply-chain hole.
+# The version comment is the human-readable half; the SHA is the contract.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+
+# Read-only by default. No lane here writes to the repository, so nothing needs
+# more; a job that ever does should raise its own permissions, not this.
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -32,8 +42,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: cachix/install-nix-action@b4b293eae0b79aac8a161bb32925a5508c9cca93 # v31
       - run: nix build .#osfacts --no-link -L
 
   live-oracle:
@@ -45,8 +55,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: cachix/install-nix-action@b4b293eae0b79aac8a161bb32925a5508c9cca93 # v31
       # A red here is honest: the host's own tools disagree with osfacts. It is
       # a separate job from `hermetic` for exactly that reason — the sandbox
       # shuts the world out, and this lane IS the world.
@@ -56,13 +66,13 @@ jobs:
     name: client-ts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
-      # Same npins pin as every other lane — no flake input, no setup-node.
-      # `--impure` because the expr reads ./nix/nixpkgs.nix by relative path;
-      # this is the idiom scripts/live-oracle.sh already uses.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: cachix/install-nix-action@b4b293eae0b79aac8a161bb32925a5508c9cca93 # v31
       - name: typecheck + unit tests
         run: |
-          nix shell --impure \
-            --expr 'let pkgs = import ./nix/nixpkgs.nix {}; in [ pkgs.nodejs pkgs.pnpm ]' \
-            -c bash -c 'cd client-ts && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm run test:unit'
+          nix develop .#client-ts -c bash -c '
+            cd client-ts
+            pnpm install --frozen-lockfile
+            pnpm run typecheck
+            pnpm run test:unit
+          '
