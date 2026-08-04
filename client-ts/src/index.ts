@@ -1,11 +1,19 @@
 /**
  * osfacts-client — the TypeScript face of the osfacts binary.
  *
- * Zero kolu imports. Zero npm runtime dependencies. The binary's contract
- * only: spawn at a path you supply, refuse a schema version you do not speak,
- * parse typed process, listener, unreadable, and source-error rows, and name
- * the facets a given ask can be answered with. Classification and blindness
- * policy are the consumer's (kolu/padi today; drishti next).
+ * Zero kolu imports. One npm runtime dependency, `effect`. The binary's
+ * contract only: spawn at a path you supply, refuse a schema version you do not
+ * speak, parse typed process, listener, unreadable, and source-error rows, and
+ * name the facets a given ask can be answered with. Classification and
+ * blindness policy are the consumer's (kolu/padi and drishti).
+ *
+ * Every SPAWNING verb returns an `Effect.Effect<…, OsfactsClientError>`; the
+ * three-function sync island (`snapshotPidsSync`, `processIdentity`,
+ * `processIdentityFromEnv`) and the parsers/folds stay synchronous and THROW.
+ * `client.ts`'s header states why that line is where it is. The error
+ * vocabulary is three tagged classes — `OsfactsSpawnError`,
+ * `OsfactsVersionError`, `OsfactsParseError` — with `OsfactsClientError` as
+ * their union and `isOsfactsClientError` as its guard.
  *
  * The exception, and it is a deliberate one: where a verb's reading has ONE
  * honest domain answer that every consumer would otherwise hand-write the same
@@ -28,7 +36,11 @@
 export {
   OSFACTS_FORMAT_VERSION,
   OSFACTS_COMMAND_TIMEOUT_MS,
-  OsfactsClientError,
+  OsfactsSpawnError,
+  OsfactsVersionError,
+  OsfactsParseError,
+  type OsfactsClientError,
+  isOsfactsClientError,
   type ProcessRow,
   type MemoryRow,
   type StartTimeRow,

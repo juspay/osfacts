@@ -1,24 +1,70 @@
-/** Spawn osfacts and parse its versioned TSV. Node builtins only. */
+/**
+ * Spawn osfacts and parse its versioned TSV. Node builtins, plus Effect.
+ *
+ * ── Two shapes, and the line between them is DECIDED ──────────────────────
+ *
+ * The SPAWNING verbs — `snapshotSubtree`, `snapshotHost`, `snapshotPids`,
+ * `processIdentityAsync`, `socketHolders`, `host`, and the function
+ * `osfactsSocketHolders` returns — hand back an
+ * `Effect.Effect<…, OsfactsClientError>`. Nothing runs until the caller runs
+ * it, every failure the client declares is in the type, and a caller that stops
+ * waiting INTERRUPTS the work rather than abandoning it (see `runOsfacts`: an
+ * interrupted fiber kills the child it left behind, which a Promise could not
+ * express).
+ *
+ * The SYNC ISLAND — `snapshotPidsSync`, `processIdentity`,
+ * `processIdentityFromEnv` — stays synchronous, over `execFileSync`, and goes
+ * on THROWING the tagged classes. Two reasons, both structural:
+ *
+ *   1. Its consumers' single-instance gate (`acquirePidGate` in
+ *      `@kolu/surface-daemon`, shared by kolu's three daemons and drishti) is a
+ *      deliberately SYNCHRONOUS claim path. The claim and the boot side effects
+ *      it guards are ordered by being in one uninterrupted run of statements;
+ *      introducing an await — or a fiber — there reorders the gate against
+ *      those side effects, which is the exact race the gate exists to lose
+ *      nothing to.
+ *   2. `execFileSync` cannot be interrupted. Wrapping it in an Effect would add
+ *      the ceremony of a fiber without adding the one capability a fiber buys —
+ *      so the wrapper would advertise an interruptibility the call does not
+ *      have, which is worse than not offering it.
+ *
+ * The PARSERS and FOLDS (`parseSnapshotOutput`, `parseSocketHoldersOutput`,
+ * `parseHostOutput`, `foldSocketOccupancy`, `snapshotFacetNames`,
+ * `emptySnapshotReading`, `bakedOsFactsBin`) are pure sync functions that throw
+ * the tagged classes. Both consumers import them directly to read a document
+ * they already have, and a pure function over a string has no effect to model.
+ */
 
 import { execFile, execFileSync } from "node:child_process";
-import { promisify } from "node:util";
+import { Effect } from "effect";
 import {
   assertBinPath,
   CHILD_OPTIONS,
   failureDocument,
   spawnFailure,
 } from "./childFailure.ts";
-import { OsfactsClientError } from "./clientError.ts";
+import {
+  isOsfactsClientError,
+  OsfactsParseError,
+  OsfactsSpawnError,
+  OsfactsVersionError,
+  type OsfactsClientError,
+} from "./clientError.ts";
 
-// Two names this module does not define but is the public face of: the error
+// The names this module does not define but is the public face of: the errors
 // every entry point raises, and the child deadline. They live one level down —
 // in leaves both this module and `childFailure.ts` can stand on without either
 // importing the other — and are re-exported here so the package keeps exactly
 // one production root.
-export { OsfactsClientError };
+export {
+  OsfactsSpawnError,
+  OsfactsVersionError,
+  OsfactsParseError,
+  isOsfactsClientError,
+  type OsfactsClientError,
+};
 export { OSFACTS_COMMAND_TIMEOUT_MS } from "./childFailure.ts";
 
-const execFileAsync = promisify(execFile);
 export const OSFACTS_FORMAT_VERSION = 2;
 const TCP_PORT_MIN = 1;
 const TCP_PORT_MAX = 65_535;
@@ -68,7 +114,10 @@ export interface ProcessArgvRow {
 interface ListenerFact {
   port: number;
   address: string;
-  uid?: number;
+  /** `| undefined` on purpose, under `exactOptionalPropertyTypes`: darwin
+   *  reports no owning uid for a socket, so the key is PRESENT and undefined on
+   *  every row of such a reading — a shape the tests pin. */
+  uid?: number | undefined;
 }
 export type ListenerRow =
   | (ListenerFact & { status: "claimed"; pid: number })
@@ -379,16 +428,14 @@ function numeric(
   expected: string,
 ): number {
   if (raw === undefined || !shape.test(raw))
-    throw new OsfactsClientError(
-      "parse",
-      `osfacts ${what} is not ${expected}: ${raw}`,
-    );
+    throw new OsfactsParseError({
+      message: `osfacts ${what} is not ${expected}: ${raw}`,
+    });
   const value = Number(raw);
   if (!valid(value))
-    throw new OsfactsClientError(
-      "parse",
-      `osfacts ${what} is not ${expected}: ${raw}`,
-    );
+    throw new OsfactsParseError({
+      message: `osfacts ${what} is not ${expected}: ${raw}`,
+    });
   return value;
 }
 function integer(raw: string | undefined, what: string): number {
@@ -421,7 +468,9 @@ function signedInteger(raw: string | undefined, what: string): number {
 function positiveInteger(raw: string | undefined, what: string): number {
   const value = integer(raw, what);
   if (value === 0)
-    throw new OsfactsClientError("parse", `osfacts ${what} must be positive`);
+    throw new OsfactsParseError({
+      message: `osfacts ${what} must be positive`,
+    });
   return value;
 }
 function jsonString(raw: string | undefined, what: string): string {
@@ -429,12 +478,13 @@ function jsonString(raw: string | undefined, what: string): string {
   try {
     value = JSON.parse(raw ?? "");
   } catch (cause) {
-    throw new OsfactsClientError("parse", `osfacts ${what} is not JSON`, {
+    throw new OsfactsParseError({
+      message: `osfacts ${what} is not JSON`,
       cause,
     });
   }
   if (typeof value !== "string")
-    throw new OsfactsClientError("parse", `osfacts ${what} is not a string`);
+    throw new OsfactsParseError({ message: `osfacts ${what} is not a string` });
   return value;
 }
 function jsonStrings(raw: string | undefined, what: string): string[] {
@@ -442,26 +492,25 @@ function jsonStrings(raw: string | undefined, what: string): string[] {
   try {
     value = JSON.parse(raw ?? "");
   } catch (cause) {
-    throw new OsfactsClientError("parse", `osfacts ${what} is not JSON`, {
+    throw new OsfactsParseError({
+      message: `osfacts ${what} is not JSON`,
       cause,
     });
   }
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string"))
-    throw new OsfactsClientError(
-      "parse",
-      `osfacts ${what} is not a string array`,
-    );
+    throw new OsfactsParseError({
+      message: `osfacts ${what} is not a string array`,
+    });
   return value;
 }
 function arity(f: string[], n: number, row: string): void {
   if (f.length !== n)
-    throw new OsfactsClientError("parse", `unreadable osfacts row: ${row}`);
+    throw new OsfactsParseError({ message: `unreadable osfacts row: ${row}` });
 }
 function unknownTag(f: string[], line: string): never {
-  throw new OsfactsClientError(
-    "parse",
-    `unknown osfacts row tag ${JSON.stringify(f[0] ?? "")}: ${line}`,
-  );
+  throw new OsfactsParseError({
+    message: `unknown osfacts row tag ${JSON.stringify(f[0] ?? "")}: ${line}`,
+  });
 }
 
 /** Check the version header both verbs share and return the body's rows. */
@@ -470,15 +519,13 @@ function bodyRows(body: string): string[] {
   const first = lines[0] ?? "";
   const version = /^V\t(\d+)$/.exec(first);
   if (version === null)
-    throw new OsfactsClientError(
-      "version",
-      `osfacts did not begin with a version line (got ${JSON.stringify(first.slice(0, 40))})`,
-    );
+    throw new OsfactsVersionError({
+      message: `osfacts did not begin with a version line (got ${JSON.stringify(first.slice(0, 40))})`,
+    });
   if (Number(version[1]) !== OSFACTS_FORMAT_VERSION)
-    throw new OsfactsClientError(
-      "version",
-      `osfacts speaks format ${version[1]}, this reader speaks ${OSFACTS_FORMAT_VERSION} — binary and client are from different sources`,
-    );
+    throw new OsfactsVersionError({
+      message: `osfacts speaks format ${version[1]}, this reader speaks ${OSFACTS_FORMAT_VERSION} — binary and client are from different sources`,
+    });
   return lines.slice(1);
 }
 
@@ -491,13 +538,12 @@ function sourceErrorRow<F extends string>(
 ): { source: string; facet: F; code: string } {
   arity(f, 4, line);
   if (!f[1] || !f[3])
-    throw new OsfactsClientError("parse", `empty source error: ${line}`);
+    throw new OsfactsParseError({ message: `empty source error: ${line}` });
   const facet = f[2];
   if (!(allowed as readonly string[]).includes(facet!))
-    throw new OsfactsClientError(
-      "parse",
-      `unknown source-error facet: ${line}`,
-    );
+    throw new OsfactsParseError({
+      message: `unknown source-error facet: ${line}`,
+    });
   return { source: f[1], facet: facet as F, code: f[3] };
 }
 
@@ -518,9 +564,11 @@ function unreadableRow(f: string[], line: string): UnreadableRow {
   arity(f, 4, line);
   const facet = f[2];
   if (!(UNREADABLE_FACETS as readonly string[]).includes(facet!))
-    throw new OsfactsClientError("parse", `unknown unreadable facet: ${line}`);
+    throw new OsfactsParseError({
+      message: `unknown unreadable facet: ${line}`,
+    });
   if (!f[3])
-    throw new OsfactsClientError("parse", `empty unreadable errno: ${line}`);
+    throw new OsfactsParseError({ message: `empty unreadable errno: ${line}` });
   return {
     pid: integer(f[1], "unreadable pid"),
     facet: facet as UnreadableFacet,
@@ -545,21 +593,19 @@ function attribution(
 ): { status: "claimed"; pid: number } | { status: "unclaimed" } {
   if (status === "claimed") {
     if (pidRaw === "-")
-      throw new OsfactsClientError(
-        "parse",
-        `claimed ${what} has no pid: ${line}`,
-      );
+      throw new OsfactsParseError({
+        message: `claimed ${what} has no pid: ${line}`,
+      });
     return { status, pid: positiveInteger(pidRaw, `${what} pid`) };
   }
   if (status === "unclaimed") {
     if (pidRaw !== "-")
-      throw new OsfactsClientError(
-        "parse",
-        `unclaimed ${what} carries a pid: ${line}`,
-      );
+      throw new OsfactsParseError({
+        message: `unclaimed ${what} carries a pid: ${line}`,
+      });
     return { status };
   }
-  throw new OsfactsClientError("parse", `unknown ${what} status: ${line}`);
+  throw new OsfactsParseError({ message: `unknown ${what} status: ${line}` });
 }
 
 export function emptySnapshotReading(): SnapshotReading {
@@ -626,10 +672,9 @@ export function parseSnapshotOutput(body: string): SnapshotReading {
         arity(f, 5, line);
         const state = f[2]!;
         if ([...state].length !== 1)
-          throw new OsfactsClientError(
-            "parse",
-            `osfacts process state is not one character: ${line}`,
-          );
+          throw new OsfactsParseError({
+            message: `osfacts process state is not one character: ${line}`,
+          });
         out.statuses.push({
           pid: integer(f[1], "status pid"),
           state,
@@ -650,16 +695,14 @@ export function parseSnapshotOutput(body: string): SnapshotReading {
         const uid = f[3] === "-" ? undefined : integer(f[3], "listener uid");
         const port = integer(f[4], "listener port");
         if (!isTcpPort(port))
-          throw new OsfactsClientError(
-            "parse",
-            `osfacts listener row carries no valid port: ${line}`,
-          );
+          throw new OsfactsParseError({
+            message: `osfacts listener row carries no valid port: ${line}`,
+          });
         const address = f[5]!;
         if (![8, 32].includes(address.length) || !/^[0-9a-f]+$/.test(address))
-          throw new OsfactsClientError(
-            "parse",
-            `osfacts listener row has a bad bind address: ${line}`,
-          );
+          throw new OsfactsParseError({
+            message: `osfacts listener row has a bad bind address: ${line}`,
+          });
         out.ports.push({
           ...attribution(f[1], f[2], line, "listener"),
           uid,
@@ -757,7 +800,9 @@ export function parseHostOutput(body: string): HostReading {
         arity(f, 8, line);
         const model = jsonString(f[6], "cpu model");
         if (model.length === 0)
-          throw new OsfactsClientError("parse", "osfacts CPU model is empty");
+          throw new OsfactsParseError({
+            message: "osfacts CPU model is empty",
+          });
         out.cpus.push({
           core: integer(f[1], "cpu core"),
           userUs: integer(f[2], "cpu user"),
@@ -797,30 +842,113 @@ export function parseHostOutput(body: string): HostReading {
   return out;
 }
 
+/**
+ * A sync function that throws the tagged classes, as an Effect that FAILS with
+ * them.
+ *
+ * The parsers and folds are pure and sync (see the module header), so every
+ * Effect verb ends in one of them and every one of them has to cross into the
+ * error channel at exactly one place. This is that place. Anything it catches
+ * that is NOT one of this client's own errors is a DEFECT and is rethrown, so
+ * it dies rather than being smuggled into a declared failure type the caller
+ * would branch on — a bug in the reader must not read as a fact about the host.
+ */
+function attempt<A>(thunk: () => A): Effect.Effect<A, OsfactsClientError> {
+  return Effect.suspend(() => {
+    try {
+      return Effect.succeed(thunk());
+    } catch (error) {
+      if (isOsfactsClientError(error)) return Effect.fail(error);
+      throw error;
+    }
+  });
+}
+
 // The two spawn twins. Everything they share — the empty-`bin` guard, the child
 // options, the failure-document short-circuit, and how a failure is composed —
-// lives in `childFailure.ts` and is applied identically here, so the ONE line
-// that may differ between them is `execFileAsync` versus `execFileSync`. That
-// is the module's own stated failure mode (a rule applied to one twin and not
-// the other) refused at the call site as well as in the classifier.
-async function runOsfacts(bin: string, args: string[]): Promise<string> {
-  assertBinPath(bin);
-  try {
-    const { stdout } = await execFileAsync(bin, args, CHILD_OPTIONS);
-    return stdout;
-  } catch (err) {
-    // A non-zero exit is not the same as no answer. The binary's documented
-    // total-failure path is "write the V line and its E rows, then exit 1" —
-    // and that document is the ONLY place the answer to *which source went
-    // blind* exists. Discarding it here because the status was non-zero threw
-    // away exactly the honesty the wire format is for, leaving every consumer
-    // an opaque "non-zero exit". Hand the document on and let the caller apply
-    // its own reject-versus-render policy, the same way it does for a partial
-    // snapshot that exited 0.
-    const document = failureDocument(err);
-    if (document !== undefined) return document;
-    throw spawnFailure(bin, err);
-  }
+// lives in `childFailure.ts` and is applied identically here, so the ONLY thing
+// that may differ between them is HOW the child is invoked (`execFile` versus
+// `execFileSync`), never what any rule says about the child that came back.
+// That is the module's own stated failure mode (a rule applied to one twin and
+// not the other) refused at the call site as well as in the classifier — and it
+// is why the callback below reassembles node's error into exactly the shape the
+// sync twin's throw already has, instead of teaching the classifier a third.
+//
+// ── Why `execFile` under `Effect.callback`, and NOT a platform Command ──────
+//
+// This is DECIDED, and the reasons are structural rather than a preference for
+// the familiar call:
+//
+//   1. `childFailure.ts` reads NODE's error shapes. `failureDocument`,
+//      `exitStatusOf`, and `errnoOf` discriminate on `.code` / `.status` /
+//      `.stderr` / `.signal` exactly as node spells them, and the module's
+//      whole reason to exist is that the two twins must classify one child's
+//      fate identically. A Command layer reshapes a failure into its own
+//      vocabulary, and the exit-2 refusal and the signal-truncation rule —
+//      one-line rules whose failure mode is a SILENTLY discarded or SILENTLY
+//      accepted document — would go inert without a single test turning red.
+//   2. The deadline that matters is the CHILD's. `CHILD_OPTIONS.timeout` with
+//      `killSignal: "SIGKILL"` is enforced by the kernel against a wedged
+//      binary; an Effect timeout interrupts the FIBER, which is a fact about
+//      the caller and not about the process. `OSFACTS_COMMAND_TIMEOUT_MS`
+//      therefore stays exactly where it is, meaning exactly what it meant.
+//   3. Zero new dependencies. drishti runs this client under BUN, so a
+//      platform-specific process layer is a compatibility surface bought for
+//      nothing.
+//
+// What the Effect DOES buy, and what a Promise could not express, is the
+// finalizer below: a caller that stops waiting kills the child it started
+// instead of leaving it to run out its five seconds unobserved.
+function runOsfacts(
+  bin: string,
+  args: string[],
+): Effect.Effect<string, OsfactsClientError> {
+  return Effect.flatMap(
+    attempt(() => assertBinPath(bin)),
+    () =>
+      Effect.callback<string, OsfactsClientError>((resume) => {
+        const child = execFile(
+          bin,
+          args,
+          CHILD_OPTIONS,
+          (err, stdout, stderr) => {
+            if (err === null) return resume(Effect.succeed(stdout));
+            // The classifier is a pure function of ONE error object, so the
+            // stdio has to be ON it — and `execFile` hands the two streams
+            // beside the error instead. `promisify(execFile)` attaches exactly
+            // these two fields before rejecting, and `execFileSync` throws a
+            // result that already carries them, so doing it here is what keeps
+            // the twins handing `childFailure.ts` one shape rather than
+            // teaching it a third.
+            const failure = err as Error & { stdout?: string; stderr?: string };
+            failure.stdout = stdout;
+            failure.stderr = stderr;
+            // A non-zero exit is not the same as no answer. The binary's
+            // documented total-failure path is "write the V line and its E
+            // rows, then exit 1" — and that document is the ONLY place the
+            // answer to *which source went blind* exists. Discarding it here
+            // because the status was non-zero threw away exactly the honesty
+            // the wire format is for, leaving every consumer an opaque
+            // "non-zero exit". Hand the document on and let the caller apply
+            // its own reject-versus-render policy, the same way it does for a
+            // partial snapshot that exited 0.
+            const document = failureDocument(failure);
+            resume(
+              document !== undefined
+                ? Effect.succeed(document)
+                : Effect.fail(spawnFailure(bin, failure)),
+            );
+          },
+        );
+        return Effect.sync(() => {
+          // Interrupted before the child settled: nobody is left to read its
+          // answer, so end it with the same signal the deadline uses — a
+          // wedged osfacts ignores SIGTERM, which is why that policy is
+          // SIGKILL, and an interruption has no more patience than a timeout.
+          child.kill(CHILD_OPTIONS.killSignal);
+        });
+      }),
+  );
 }
 
 function runOsfactsSync(bin: string, args: string[]): string {
@@ -849,37 +977,49 @@ function snapshotArgs(
 ): string[] {
   return appendSnapshotFacets(["snapshot", scopeFlag, pids.join(",")], facets);
 }
-async function snapshot(bin: string, args: string[]): Promise<SnapshotReading> {
-  return parseSnapshotOutput(await runOsfacts(bin, args));
+function snapshot(
+  bin: string,
+  args: string[],
+): Effect.Effect<SnapshotReading, OsfactsClientError> {
+  return Effect.flatMap(runOsfacts(bin, args), (body) =>
+    attempt(() => parseSnapshotOutput(body)),
+  );
 }
 
+/** Every process in the subtrees rooted at `rootPids`. An empty root set is not
+ *  an ask: there is no subtree to walk, so the answer is the empty reading and
+ *  NO child is spawned. */
 export function snapshotSubtree(
   bin: string,
   rootPids: readonly number[],
   facets: SnapshotFacets,
-): Promise<SnapshotReading> {
+): Effect.Effect<SnapshotReading, OsfactsClientError> {
   return rootPids.length === 0
-    ? Promise.resolve(emptySnapshotReading())
+    ? Effect.succeed(emptySnapshotReading())
     : snapshot(bin, snapshotArgs("--roots", rootPids, facets));
 }
 export function snapshotHost(
   bin: string,
   facets: SnapshotFacets,
-): Promise<SnapshotReading> {
+): Effect.Effect<SnapshotReading, OsfactsClientError> {
   return snapshot(bin, appendSnapshotFacets(["snapshot"], facets));
 }
+/** Exactly the pids named. As with {@link snapshotSubtree}, an empty pid list
+ *  short-circuits to the empty reading without a spawn. */
 export function snapshotPids(
   bin: string,
   pids: readonly number[],
   facets: SnapshotFacets,
-): Promise<SnapshotReading> {
+): Effect.Effect<SnapshotReading, OsfactsClientError> {
   return pids.length === 0
-    ? Promise.resolve(emptySnapshotReading())
+    ? Effect.succeed(emptySnapshotReading())
     : snapshot(bin, snapshotArgs("--pids", pids, facets));
 }
 
 /** Sync twin of {@link snapshotPids} — for gate acquisition and other sites
- * that must not introduce async into a sync claim path. */
+ * that must not introduce async into a sync claim path. It THROWS an
+ * {@link OsfactsClientError} rather than returning one, and that is the whole
+ * island's contract (the module header says why it is not an Effect). */
 export function snapshotPidsSync(
   bin: string,
   pids: readonly number[],
@@ -899,17 +1039,15 @@ export function snapshotPidsSync(
  */
 export function bakedOsFactsBin(envVar: string): string {
   if (!envVar) {
-    throw new OsfactsClientError(
-      "spawn",
-      "bakedOsFactsBin: env var name is empty",
-    );
+    throw new OsfactsSpawnError({
+      message: "bakedOsFactsBin: env var name is empty",
+    });
   }
   const path = process.env[envVar];
   if (!path) {
-    throw new OsfactsClientError(
-      "spawn",
-      `${envVar} is not set — the baked osfacts binary path is required (nix wrappers set it; no PATH fallback)`,
-    );
+    throw new OsfactsSpawnError({
+      message: `${envVar} is not set — the baked osfacts binary path is required (nix wrappers set it; no PATH fallback)`,
+    });
   }
   return path;
 }
@@ -937,12 +1075,12 @@ function foldStartTimeReading(
   ) {
     return undefined;
   }
-  throw new OsfactsClientError(
-    "parse",
-    unreadable !== undefined
-      ? `osfacts could not read pid ${pid} start time (${unreadable.errno})`
-      : `osfacts returned no start time for pid ${pid}`,
-  );
+  throw new OsfactsParseError({
+    message:
+      unreadable !== undefined
+        ? `osfacts could not read pid ${pid} start time (${unreadable.errno})`
+        : `osfacts returned no start time for pid ${pid}`,
+  });
 }
 
 /**
@@ -960,14 +1098,19 @@ export function processIdentity(
   );
 }
 
-/** Async twin of {@link processIdentity} for serving-loop / endpoint paths. */
-export async function processIdentityAsync(
+/** Effect twin of {@link processIdentity} for serving-loop / endpoint paths —
+ *  the one to reach for anywhere the sync island's reason (a synchronous gate
+ *  claim) does not apply, because it neither blocks the event loop nor outlives
+ *  a caller that gave up. */
+export function processIdentityAsync(
   bin: string,
   pid: number,
-): Promise<{ pid: number; startUnixUs: number } | undefined> {
-  return foldStartTimeReading(
-    await snapshotPids(bin, [pid], { startTime: true }),
-    pid,
+): Effect.Effect<
+  { pid: number; startUnixUs: number } | undefined,
+  OsfactsClientError
+> {
+  return Effect.flatMap(snapshotPids(bin, [pid], { startTime: true }), (r) =>
+    attempt(() => foldStartTimeReading(r, pid)),
   );
 }
 
@@ -997,25 +1140,29 @@ export function processIdentityFromEnv(
  * "unclaimed"}` row is *something holds it that I could not name*; a
  * `socket_holders` error row is *I could not look*.
  */
-export async function socketHolders(
+export function socketHolders(
   bin: string,
   socketPath: string,
   facets: { procs?: boolean } = {},
-): Promise<SocketHoldersReading> {
-  // `async`, so the empty-path guard REJECTS rather than throwing
-  // synchronously. Every other spawn entry point in this module rejects
-  // (`runOsfacts`'s own empty-`bin` guard included), and a caller writing
-  // `socketHolders(bin, path).catch(handle)` — the shape the module teaches —
-  // would otherwise get an uncaught exception from one function out of all of
-  // them.
+): Effect.Effect<SocketHoldersReading, OsfactsClientError> {
+  // The empty-path guard is a typed FAILURE of the returned Effect, not a
+  // throw. The old note here explained that the function was `async` so this
+  // one guard would reject like every other spawn entry point rather than
+  // exploding in the caller's face — a rule the return type could not state,
+  // and which a future edit dropping `async` would have silently broken. The
+  // Effect states it: `OsfactsSpawnError` is in the signature, so there is no
+  // longer a shape for this guard to be the odd one out of.
   if (!socketPath)
-    throw new OsfactsClientError(
-      "spawn",
-      "osfacts socket-holders needs a socket path",
+    return Effect.fail(
+      new OsfactsSpawnError({
+        message: "osfacts socket-holders needs a socket path",
+      }),
     );
   const args = ["socket-holders", socketPath];
   if (facets.procs) args.push("--procs");
-  return parseSocketHoldersOutput(await runOsfacts(bin, args));
+  return Effect.flatMap(runOsfacts(bin, args), (body) =>
+    attempt(() => parseSocketHoldersOutput(body)),
+  );
 }
 
 /** A process the OS reports as holding a socket path — its pid and a human
@@ -1030,8 +1177,12 @@ export interface SocketHolder {
    *  indistinguishable from a process genuinely reporting `?` as its name,
    *  which is the same one-value-several-facts collapse the three-way reading
    *  above exists to refuse — one level down, inside a holder. Diagnostic only,
-   *  never a decision input. */
-  command?: string;
+   *  never a decision input.
+   *
+   *  `| undefined` on purpose, under `exactOptionalPropertyTypes`: the fold
+   *  BUILDS the key from a lookup that may miss, and the tests pin the
+   *  present-and-undefined shape. */
+  command?: string | undefined;
 }
 
 /**
@@ -1113,10 +1264,10 @@ export function foldSocketOccupancy(
   // as `none` it would be absence asserted out of a contradiction, so it is a
   // parse error, exactly as an unknown tag or a bad arity is.
   if (reading.procs.length > 0 || reading.unreadable.length > 0)
-    throw new OsfactsClientError(
-      "parse",
-      "osfacts socket-holders named a holder's identity without naming the holder — refusing to read a contradictory document as an unheld socket",
-    );
+    throw new OsfactsParseError({
+      message:
+        "osfacts socket-holders named a holder's identity without naming the holder — refusing to read a contradictory document as an unheld socket",
+    });
   return { kind: "none" };
 }
 
@@ -1132,20 +1283,24 @@ export function foldSocketOccupancy(
  */
 export function osfactsSocketHolders(
   bin: string,
-): (socketPath: string) => Promise<SocketOccupancy> {
-  return async (socketPath) =>
-    foldSocketOccupancy(await socketHolders(bin, socketPath, { procs: true }));
+): (socketPath: string) => Effect.Effect<SocketOccupancy, OsfactsClientError> {
+  return (socketPath) =>
+    Effect.flatMap(socketHolders(bin, socketPath, { procs: true }), (reading) =>
+      attempt(() => foldSocketOccupancy(reading)),
+    );
 }
 
-export async function host(
+export function host(
   bin: string,
   facets: HostFacets,
-): Promise<HostReading> {
+): Effect.Effect<HostReading, OsfactsClientError> {
   const args = ["host"];
   if (facets.load) args.push("--load");
   if (facets.mem) args.push("--mem");
   if (facets.cpu) args.push("--cpu");
   if (facets.net) args.push("--net");
   if (facets.disk) args.push("--disk");
-  return parseHostOutput(await runOsfacts(bin, args));
+  return Effect.flatMap(runOsfacts(bin, args), (body) =>
+    attempt(() => parseHostOutput(body)),
+  );
 }

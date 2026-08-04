@@ -4,17 +4,24 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect, Fiber } from "effect";
 import {
-  OsfactsClientError,
+  emptySnapshotReading,
+  isOsfactsClientError,
+  OsfactsParseError,
+  OsfactsSpawnError,
+  OsfactsVersionError,
   parseHostOutput,
   parseSnapshotOutput,
   parseSocketHoldersOutput,
   OSFACTS_FORMAT_VERSION,
   snapshotHost,
+  snapshotPids,
   snapshotPidsSync,
+  snapshotSubtree,
   socketHolders,
   foldSocketOccupancy,
   type SocketHoldersReading,
@@ -32,16 +39,54 @@ const V4_MAPPED_LOOPBACK = "00000000000000000000ffff7f000001";
  * client agree with a fiction. One helper because the mkdtemp → write → chmod →
  * run → `finally` rm dance was written out at every such site, and a site that
  * forgot the `finally` leaks a temp dir per run.
+ *
+ * `body` is built from the stub's own directory, so a stub that has to report
+ * something back (its pid, say) has a path to report it to.
  */
-async function withStub<T>(body: string, run: (bin: string) => T): Promise<T> {
+async function withStub<T>(
+  body: string | ((dir: string) => string),
+  run: (bin: string, dir: string) => T,
+): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "osfacts-client-"));
   const bin = join(dir, "osfacts-stub");
   try {
-    await writeFile(bin, body);
+    await writeFile(bin, typeof body === "string" ? body : body(dir));
     await chmod(bin, 0o755);
-    return await run(bin);
+    return await run(bin, dir);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/** Run a spawning verb to a settled Promise. The verbs return Effects, so a
+ *  pin on what one ANSWERS runs it; a pin on how one FAILS lets the rejection
+ *  carry the tagged class, exactly as `runPromise` surfaces it. */
+const run = Effect.runPromise;
+
+/** Poll `check` until it stops throwing, or give up after a second. Used for
+ *  the two facts a signal makes true asynchronously: a child has written its
+ *  pid, and a killed child has actually gone. */
+async function eventually(check: () => Promise<void> | void): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  for (;;) {
+    try {
+      await check();
+      return;
+    } catch (error) {
+      if (Date.now() > deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+}
+
+/** Is this pid still around? Signal 0 checks for the process without sending
+ *  anything; ESRCH is the kernel saying it is gone. */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -139,7 +184,7 @@ describe("parseSnapshotOutput", () => {
     await withStub(
       '#!/bin/sh\n[ "$#" = 2 ] && [ "$1" = snapshot ] && [ "$2" = --uid ] || exit 9\nprintf "V\\t2\\nUID\\t1\\t0\\n"\n',
       (bin) =>
-        expect(snapshotHost(bin, { uid: true })).resolves.toMatchObject({
+        expect(run(snapshotHost(bin, { uid: true }))).resolves.toMatchObject({
           uids: [{ pid: 1, uid: 0 }],
         }),
     );
@@ -153,7 +198,7 @@ describe("parseSnapshotOutput", () => {
     await withStub(
       '#!/bin/sh\nprintf "V\\t2\\nE\\tproc_readdir\\tproc\\tEACCES\\n"\nexit 1\n',
       (bin) =>
-        expect(snapshotHost(bin, { procs: true })).resolves.toMatchObject({
+        expect(run(snapshotHost(bin, { procs: true }))).resolves.toMatchObject({
           procs: [],
           errors: [{ source: "proc_readdir", facet: "proc", code: "EACCES" }],
         }),
@@ -162,26 +207,43 @@ describe("parseSnapshotOutput", () => {
 
   it("still fails loudly when a non-zero exit produced no document", async () => {
     await withStub('#!/bin/sh\necho "boom" >&2\nexit 3\n', (bin) =>
-      expect(snapshotHost(bin, { procs: true })).rejects.toThrow(
-        OsfactsClientError,
+      expect(run(snapshotHost(bin, { procs: true }))).rejects.toThrow(
+        OsfactsSpawnError,
       ),
     );
   });
 
   it("refuses a version it does not speak", () => {
     expect(() => parseSnapshotOutput("V\t1\nP\t1\t0\tlaunchd\n")).toThrow(
-      OsfactsClientError,
+      OsfactsVersionError,
     );
     expect(() => parseSnapshotOutput("P\t1\t0\tlaunchd\n")).toThrow(
-      OsfactsClientError,
+      OsfactsVersionError,
     );
     try {
       parseSnapshotOutput("V\t1\n");
     } catch (e) {
-      expect(e).toBeInstanceOf(OsfactsClientError);
-      expect((e as OsfactsClientError).kind).toBe("version");
+      // The `kind` string a caller used to compare by hand is now the class
+      // itself — narrowed by the guard, not by a spelling that nothing checked.
+      expect(isOsfactsClientError(e)).toBe(true);
+      expect(e).toBeInstanceOf(OsfactsVersionError);
       expect((e as Error).message).toContain(String(OSFACTS_FORMAT_VERSION));
     }
+  });
+
+  /** Nothing to walk is not a question for the binary. `""` is a path
+   *  `assertBinPath` refuses, so a reading coming back at all proves no spawn
+   *  was attempted. */
+  it("answers an empty pid scope without spawning anything", async () => {
+    await expect(
+      run(snapshotPids("", [], { startTime: true })),
+    ).resolves.toEqual(emptySnapshotReading());
+    await expect(
+      run(snapshotSubtree("", [], { startTime: true })),
+    ).resolves.toEqual(emptySnapshotReading());
+    expect(snapshotPidsSync("", [], { startTime: true })).toEqual(
+      emptySnapshotReading(),
+    );
   });
 
   it("fails loudly on every row it cannot read", () => {
@@ -214,12 +276,12 @@ describe("parseSnapshotOutput", () => {
       "V\t2\nSTAT\t1\tR\t \t12\n",
     ];
     for (const body of bad) {
-      expect(() => parseSnapshotOutput(body)).toThrow(OsfactsClientError);
+      expect(() => parseSnapshotOutput(body)).toThrow(OsfactsParseError);
     }
   });
 
   it("refuses a host document — the two verbs are two contracts", () => {
-    expect(() => parseSnapshotOutput(HOST_SAMPLE)).toThrow(OsfactsClientError);
+    expect(() => parseSnapshotOutput(HOST_SAMPLE)).toThrow(OsfactsParseError);
   });
 });
 
@@ -253,10 +315,10 @@ describe("parseHostOutput", () => {
   });
 
   it("refuses a snapshot document — and a snapshot's facet vocabulary", () => {
-    expect(() => parseHostOutput(SNAPSHOT_SAMPLE)).toThrow(OsfactsClientError);
+    expect(() => parseHostOutput(SNAPSHOT_SAMPLE)).toThrow(OsfactsParseError);
     expect(() =>
       parseHostOutput("V\t2\nE\tdarwin_tcp_pcblist\tports_unclaimed\tX\n"),
-    ).toThrow(OsfactsClientError);
+    ).toThrow(OsfactsParseError);
   });
 });
 
@@ -312,16 +374,16 @@ describe("parseSocketHoldersOutput", () => {
       "V\t2\nE\tproc_net_tcp\tports\tEACCES\n",
     ];
     for (const body of bad) {
-      expect(() => parseSocketHoldersOutput(body)).toThrow(OsfactsClientError);
+      expect(() => parseSocketHoldersOutput(body)).toThrow(OsfactsParseError);
     }
   });
 
   it("refuses the other verbs' documents", () => {
     expect(() => parseSocketHoldersOutput(SNAPSHOT_SAMPLE)).toThrow(
-      OsfactsClientError,
+      OsfactsParseError,
     );
     expect(() => parseSocketHoldersOutput(HOST_SAMPLE)).toThrow(
-      OsfactsClientError,
+      OsfactsParseError,
     );
   });
 });
@@ -334,13 +396,13 @@ describe("socketHolders", () => {
       '#!/bin/sh\nprintf "V\\t2\\nH\\tclaimed\\t7\\nP\\t7\\t1\\t%s\\n" "$*"\n',
       async (bin) => {
         await expect(
-          socketHolders(bin, "/run/user/1000/kaval.sock"),
+          run(socketHolders(bin, "/run/user/1000/kaval.sock")),
         ).resolves.toMatchObject({
           holders: [{ status: "claimed", pid: 7 }],
           procs: [{ name: "socket-holders /run/user/1000/kaval.sock" }],
         });
         await expect(
-          socketHolders(bin, "/run/user/1000/kaval.sock", { procs: true }),
+          run(socketHolders(bin, "/run/user/1000/kaval.sock", { procs: true })),
         ).resolves.toMatchObject({
           procs: [{ name: "socket-holders /run/user/1000/kaval.sock --procs" }],
         });
@@ -348,20 +410,62 @@ describe("socketHolders", () => {
     );
   });
 
+  /** A typed FAILURE of the Effect, not a synchronous throw: the guard is in
+   *  the error channel with every other spawn refusal, so a caller that runs
+   *  the verb sees one shape rather than two. */
   it("refuses an empty path rather than asking about some other socket", async () => {
-    await expect(socketHolders("/bin/true", "")).rejects.toThrow(
-      OsfactsClientError,
+    await expect(run(socketHolders("/bin/true", ""))).rejects.toThrow(
+      OsfactsSpawnError,
     );
+    expect(() => socketHolders("/bin/true", "")).not.toThrow();
   });
 
   it("keeps the E rows of a blind walk that exited non-zero", async () => {
     await withStub(
       '#!/bin/sh\nprintf "V\\t2\\nE\\tdarwin_proc_fds\\tsocket_holders\\tBLIND_OR_EMPTY\\n"\nexit 1\n',
       (bin) =>
-        expect(socketHolders(bin, "/run/a.sock")).resolves.toMatchObject({
+        expect(run(socketHolders(bin, "/run/a.sock"))).resolves.toMatchObject({
           holders: [],
           errors: [{ facet: "socket_holders", code: "BLIND_OR_EMPTY" }],
         }),
+    );
+  });
+});
+
+/**
+ * The capability the Effect actually buys, and the reason the spawn is an
+ * `Effect.callback` around `execFile` rather than a Promise: a caller that
+ * stops waiting KILLS the child.
+ *
+ * A Promise-shaped spawn had no way to say this. An abandoned
+ * `snapshotHost(...)` left a real process running out its five-second deadline
+ * against a host nobody was reading — invisible, and multiplied by every
+ * abandoned probe.
+ */
+describe("an interrupted fiber kills the child it started", () => {
+  it("leaves no process behind", async () => {
+    await withStub(
+      // `exec`, so the sleeping process IS the pid the stub reported — a
+      // shell that forked would report a pid whose death proves nothing about
+      // the sleep it left behind.
+      (dir) =>
+        `#!/bin/sh\necho $$ > ${join(dir, "child.pid")}\nexec sleep 30\n`,
+      async (bin, dir) => {
+        const pidFile = join(dir, "child.pid");
+        const fiber = Effect.runFork(snapshotHost(bin, { procs: true }));
+        let childPid = 0;
+        await eventually(async () => {
+          childPid = Number((await readFile(pidFile, "utf8")).trim());
+          expect(childPid).toBeGreaterThan(0);
+        });
+        expect(alive(childPid)).toBe(true);
+
+        await run(Fiber.interrupt(fiber));
+
+        await eventually(() => {
+          expect(alive(childPid)).toBe(false);
+        });
+      },
     );
   });
 });
@@ -378,11 +482,11 @@ describe("a refused ask is never an empty answer", () => {
     await withStub(
       '#!/bin/sh\nprintf "V\\t2\\n"\necho "osfacts: unknown command \'socket-holders\'" >&2\nexit 2\n',
       async (bin) => {
-        await expect(socketHolders(bin, "/run/a.sock")).rejects.toThrow(
+        await expect(run(socketHolders(bin, "/run/a.sock"))).rejects.toThrow(
           /unknown command/,
         );
-        await expect(snapshotHost(bin, { procs: true })).rejects.toThrow(
-          OsfactsClientError,
+        await expect(run(snapshotHost(bin, { procs: true }))).rejects.toThrow(
+          OsfactsSpawnError,
         );
       },
     );
@@ -433,7 +537,7 @@ describe("the sync twin obeys the same exit-status rule", () => {
   it("still fails loudly when a non-zero exit produced no document", async () => {
     await withStub("#!/bin/sh\necho boom >&2\nexit 3\n", (bin) =>
       expect(() => snapshotPidsSync(bin, [1], { startTime: true })).toThrow(
-        OsfactsClientError,
+        OsfactsSpawnError,
       ),
     );
   });
@@ -547,7 +651,7 @@ describe("foldSocketOccupancy refuses a contradictory document", () => {
       "V\t2\nU\t7\tproc\tEACCES\n",
     ]) {
       const reading = parseSocketHoldersOutput(body);
-      expect(() => foldSocketOccupancy(reading)).toThrow(OsfactsClientError);
+      expect(() => foldSocketOccupancy(reading)).toThrow(OsfactsParseError);
     }
   });
 

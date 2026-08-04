@@ -13,6 +13,14 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noUncheckedIndexedAccess": true,
+    // The four genuinely-absent fields of `HostReading` (`load`, `memory`,
+    // `swap`, `uptimeUs`) mean "this source was not asked for, or went blind",
+    // and that is not the same fact as "present, holding undefined". With this
+    // flag the distinction is machine-checked instead of being a convention in
+    // a comment: the two shapes that ARE deliberately present-and-undefined
+    // (`ListenerRow.uid`, `SocketHolder.command`) now have to say so in their
+    // types, which is exactly the declaration the reader wants.
+    "exactOptionalPropertyTypes": true,
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
