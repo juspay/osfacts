@@ -14,6 +14,9 @@
     "typecheck": "tsc --noEmit",
     "test:unit": "vitest run"
   },
+  "dependencies": {
+    "effect": "4.0.0-beta.106"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^7.0.2",

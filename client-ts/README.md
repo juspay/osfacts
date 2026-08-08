@@ -12,27 +12,63 @@ process, listener, socket-holder, unreadable, source-error, and host rows.
 Nothing more.
 
 ```ts
+import { Effect } from "effect";
 import { snapshotHost } from "osfacts-client";
 
-const reading = await snapshotHost(process.env.OSFACTS_BIN!, {
-  procs: true,
-  uid: true,
-  cwd: true,
-  status: true,
-  argv: true,
-  cpuTime: true,
+const program = Effect.gen(function* () {
+  const reading = yield* snapshotHost(process.env.OSFACTS_BIN!, {
+    procs: true,
+    uid: true,
+    cwd: true,
+    status: true,
+    argv: true,
+    cpuTime: true,
+  });
+  if (reading.errors.length > 0) {
+    // This consumer rejects partial source failures; another may render them.
+    throw new Error(JSON.stringify(reading.errors));
+  }
+  // reading.procs · reading.uids · reading.cwds · reading.statuses · reading.argv
+  return reading;
 });
-if (reading.errors.length > 0) {
-  // This consumer rejects partial source failures; another may render them.
-  throw new Error(JSON.stringify(reading.errors));
-}
-// reading.procs · reading.uids · reading.cwds · reading.statuses · reading.argv
 ```
 
-No `@kolu` imports. No npm runtime dependencies — only `node:child_process`
-and friends — so a second consumer can pin this package without dragging
-kolu's monorepo graph. kolu (via padi and its daemon supervisor) and drishti
-both ship it.
+No `@kolu` imports. One npm runtime dependency, `effect` — otherwise
+`node:child_process` and friends — so a second consumer can pin this package
+without dragging kolu's monorepo graph. kolu (via padi and its daemon
+supervisor) and drishti both ship it.
+
+## The Effect surface
+
+Every SPAWNING verb — `snapshotSubtree`, `snapshotHost`, `snapshotPids`,
+`processIdentityAsync`, `socketHolders`, `host`, and the function
+`osfactsSocketHolders` returns — hands back an
+`Effect.Effect<Reading, OsfactsClientError>`. Nothing spawns until you run it,
+every failure the client declares is in the type rather than in a comment, and
+a caller that stops waiting INTERRUPTS the work: the in-flight child is killed
+rather than left to run out its five-second deadline against a host nobody is
+reading. That last part is the capability a `Promise` could not express, and
+the reason the spawn is an `Effect.callback` around node's own `execFile`
+rather than a platform command layer — the child-level timeout stays
+kernel-enforced, and the exit-status rules below keep reading node's own error
+shapes.
+
+Three functions are a deliberate SYNC ISLAND and stay synchronous, throwing
+rather than failing: `snapshotPidsSync`, `processIdentity`, and
+`processIdentityFromEnv`. Their consumers' single-instance gate is a
+synchronous claim path — async there reorders the gate against the boot side
+effects it guards — and `execFileSync` cannot be interrupted, so an Effect
+wrapper would advertise a capability the call does not have. The parsers and
+folds (`parseSnapshotOutput`, `parseSocketHoldersOutput`, `parseHostOutput`,
+`foldSocketOccupancy`, `snapshotFacetNames`, `bakedOsFactsBin`) are pure
+functions over a string you already have, and throw for the same reason.
+
+The error vocabulary is three tagged classes — `OsfactsSpawnError` (the child
+could not be launched or would not answer), `OsfactsVersionError` (the document
+speaks a format this reader does not), and `OsfactsParseError` (a row it cannot
+read) — with `OsfactsClientError` as their union and `isOsfactsClientError` as
+the guard that narrows a `catch`. They are `Error`s, which is what lets the sync
+island go on throwing them.
 
 Policy about what a fact *means* — which blindness matters, whether to reject
 or render a partial reading, what to do about a holder — is the consumer's,
@@ -83,13 +119,16 @@ which is exactly the mistake a per-consumer copy makes.
 
 ## What it does not
 
-- Read `KOLU_OSFACTS_BIN` (or any env) — the caller owns the path.
+- Read `KOLU_OSFACTS_BIN` (or any env) on your behalf. `bakedOsFactsBin(name)`
+  reads the env var you name — loudly, with no PATH fallback — and a
+  composition root calls it ONCE. Every verb takes a resolved path.
 - Classify addresses into any / loopback / interface.
 - Fold ports, rank scopes, or decide that a U row blinds a terminal.
-- Spawn synchronously, or answer identity questions ("is this still the same
-  process?"). That is a supervisor's gate policy, and it belongs beside the
-  supervisor that owns it.
-- Depend on zod, pino, or anything that is not a Node built-in.
+- Decide what a fact MEANS. `processIdentity*` reports a pid's
+  start-qualified identity; whether that answers "is this still the same
+  process?" is a supervisor's gate policy, and it belongs beside the supervisor
+  that owns it.
+- Depend on zod, pino, or anything beyond `effect` and Node built-ins.
 
 ## The facet vocabulary
 

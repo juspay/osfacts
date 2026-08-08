@@ -4,8 +4,8 @@
  * options object, not the call.
  *
  * Its own module because the two spawn twins disagree about how they spell a
- * child's fate, and one reader has to reconcile them: `promisify(execFile)`
- * rejects with `.code` (the exit status) and `.killed`, while `execFileSync`
+ * child's fate, and one reader has to reconcile them: `execFile`'s callback
+ * error carries `.code` (the exit status) and `.killed`, while `execFileSync`
  * throws the raw spawnSync result — `.status`, `.signal`, and no `.code` at
  * all. A rule written against one spelling is silently inert on the other
  * twin, which is exactly how the exit-1 document rule below came to be
@@ -15,8 +15,8 @@
  * signal, or a buffer cap bumped on one twin and not the other would leave the
  * sync gate path quietly running the old policy. So the options and the
  * failure composition are stated ONCE here and applied by both twins, and the
- * only line the twins may still spell differently is `execFileAsync` versus
- * `execFileSync`.
+ * only line the twins may still spell differently is `execFile` (through
+ * `Effect.callback`) versus `execFileSync`.
  *
  * Being a pure function of the error object is what lets the classifier be
  * pinned without manufacturing a real child that exits mid-write. The module
@@ -26,9 +26,9 @@
  * punched through the client's production root.
  */
 
-// From the zero-dependency leaf, not from `client.ts`: `client.ts` imports this
-// module, so taking the class from there would make the pair a cycle.
-import { OsfactsClientError } from "./clientError.ts";
+// From the error leaf, not from `client.ts`: `client.ts` imports this module, so
+// taking the class from there would make the pair a cycle.
+import { OsfactsSpawnError } from "./clientError.ts";
 
 /** How long a child may run before it is killed. Public (re-exported by
  *  `client.ts`, and consumed as `PORT_SCAN_COMMAND_TIMEOUT_MS` by padi), and
@@ -56,28 +56,27 @@ export const CHILD_OPTIONS = {
  *  confusing ENOENT rather than as the missing bake it is. */
 export function assertBinPath(bin: string): void {
   if (!bin)
-    throw new OsfactsClientError(
-      "spawn",
-      "osfacts binary path is empty — the caller must supply an absolute path",
-    );
+    throw new OsfactsSpawnError({
+      message:
+        "osfacts binary path is empty — the caller must supply an absolute path",
+    });
 }
 
 /** How a child's failure becomes the client's error — one composition, so the
  *  two twins cannot drift on what an operator is told. `errnoOf` first because
  *  a spawn errno (ENOENT/EACCES) names the cause better than any exit status
  *  the runtime may also have attached. */
-export function spawnFailure(bin: string, err: unknown): OsfactsClientError {
-  return new OsfactsClientError(
-    "spawn",
-    `osfacts \`${bin}\` failed (${errnoOf(err) ?? exitDescription(err)})${failureDetail(err)}`,
-    { cause: err },
-  );
+export function spawnFailure(bin: string, err: unknown): OsfactsSpawnError {
+  return new OsfactsSpawnError({
+    message: `osfacts \`${bin}\` failed (${errnoOf(err) ?? exitDescription(err)})${failureDetail(err)}`,
+    cause: err,
+  });
 }
 
 /**
  * The child's exit status, however the runtime spelled it.
  *
- * `promisify(execFile)` puts it on `.code`; `execFileSync` throws the raw
+ * `execFile`'s callback error puts it on `.code`; `execFileSync` throws the raw
  * spawnSync result, whose status is `.status` and which has no `.code` at all.
  * One reader for both, because the async and sync twins must not be able to
  * disagree about what "the binary exited 1" means — a guard that reads only
