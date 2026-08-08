@@ -12,7 +12,7 @@
  * thing a caller branched on, and a string compared by hand is a discriminant
  * only by convention: nothing stopped `kind === "parse"` from being written
  * `"parsing"`, and nothing narrowed the value when it matched. As
- * `Schema.TaggedErrorClass`es the discriminant is the `_tag`, the classes are
+ * `Schema.TaggedError`es the discriminant is the `_tag`, the classes are
  * `instanceof`-checkable at a `catch`, and an Effect verb can declare exactly
  * which of them it can fail with. They are still `Error`s, which is what lets
  * the SYNC island (see `client.ts`) go on throwing them.
@@ -30,7 +30,7 @@ import { Schema } from "effect";
  *  a missing bake, an empty socket path, or a child that failed without leaving
  *  a document behind. `cause` carries the runtime's own spawn error where there
  *  was one. */
-export class OsfactsSpawnError extends Schema.TaggedErrorClass<OsfactsSpawnError>(
+export class OsfactsSpawnError extends Schema.TaggedError<OsfactsSpawnError>(
   "osfacts-client/OsfactsSpawnError",
 )("OsfactsSpawnError", {
   message: Schema.String,
@@ -41,7 +41,7 @@ export class OsfactsSpawnError extends Schema.TaggedErrorClass<OsfactsSpawnError
  *  class rather than a parse failure because it is the ONE failure that means
  *  "binary and client are from different sources" — a deployment fact, not a
  *  corrupt row. */
-export class OsfactsVersionError extends Schema.TaggedErrorClass<OsfactsVersionError>(
+export class OsfactsVersionError extends Schema.TaggedError<OsfactsVersionError>(
   "osfacts-client/OsfactsVersionError",
 )("OsfactsVersionError", { message: Schema.String }) {}
 
@@ -49,7 +49,7 @@ export class OsfactsVersionError extends Schema.TaggedErrorClass<OsfactsVersionE
  *  not the number/JSON/status it must be, or a document whose rows contradict
  *  each other. `cause` carries `JSON.parse`'s own error where the field was
  *  meant to be JSON. */
-export class OsfactsParseError extends Schema.TaggedErrorClass<OsfactsParseError>(
+export class OsfactsParseError extends Schema.TaggedError<OsfactsParseError>(
   "osfacts-client/OsfactsParseError",
 )("OsfactsParseError", {
   message: Schema.String,
