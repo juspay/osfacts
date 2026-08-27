@@ -73,10 +73,24 @@ while IFS= read -r cdrv; do
     exit 1
   fi
 
-  tmp="$tmpdir/$(basename "$out")"
+  # `nix-store --add-fixed` names the store path after the FILE's basename, so
+  # the temp file must be named `crate-<name>-<ver>.tar.gz` — the store path's
+  # name WITHOUT its hash prefix. Naming it after the full basename mints
+  # `<newhash>-<oldhash>-crate-…`, a path no FOD is looking for, and the build
+  # then 403s exactly as if nothing had been prefetched.
+  store_name=$(basename "$out" | cut -d- -f2-)
+  tmp="$tmpdir/$store_name"
   curl -fsSL -A "$UA" -o "$tmp" "$url"
-  nix-store --add-fixed sha256 "$tmp" >/dev/null
-  echo "prefetched: $(basename "$out")"
+  added=$(nix-store --add-fixed sha256 "$tmp")
+
+  # Self-check, because the failure mode above is silent: unless the path we
+  # just added IS the FOD's output path, we have cached nothing useful.
+  if [ "$added" != "$out" ]; then
+    echo "prefetch landed at $added but the FOD wants $out" >&2
+    exit 1
+  fi
+
+  echo "prefetched: $store_name"
   prefetched=$((prefetched + 1))
 done < "$list"
 
