@@ -53,7 +53,7 @@ jobs:
       # See scripts/ci-prefetch-crates.sh for the measurement and why
       # NIX_CURL_FLAGS does not reach the builder. Idempotent; a no-op once the
       # crates are cached or substituted.
-      - run: sh scripts/ci-prefetch-crates.sh
+      - run: bash scripts/ci-prefetch-crates.sh
       - run: nix build .#osfacts --no-link -L
 
   live-oracle:
