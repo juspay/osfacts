@@ -48,6 +48,12 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: cachix/install-nix-action@b4b293eae0b79aac8a161bb32925a5508c9cca93 # v31
+      # crates.io 403s a `curl/*` User-Agent, which is what nixpkgs' fetchurl
+      # sends — so every crate FOD in the vendor closure fails to download.
+      # See scripts/ci-prefetch-crates.sh for the measurement and why
+      # NIX_CURL_FLAGS does not reach the builder. Idempotent; a no-op once the
+      # crates are cached or substituted.
+      - run: bash scripts/ci-prefetch-crates.sh
       - run: nix build .#osfacts --no-link -L
 
   live-oracle:
@@ -61,6 +67,11 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: cachix/install-nix-action@b4b293eae0b79aac8a161bb32925a5508c9cca93 # v31
+      # Same crates.io 403 as `hermetic`, and this lane needs its own pass: it
+      # is a separate job on a separate runner with its own empty store, and it
+      # builds `.#osfacts` too (to get a binary to point at a real host). A
+      # green hermetic does not warm this store.
+      - run: bash scripts/ci-prefetch-crates.sh
       # A red here is honest: the host's own tools disagree with osfacts. It is
       # a separate job from `hermetic` for exactly that reason — the sandbox
       # shuts the world out, and this lane IS the world.
