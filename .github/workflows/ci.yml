@@ -48,6 +48,12 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: cachix/install-nix-action@b4b293eae0b79aac8a161bb32925a5508c9cca93 # v31
+      # crates.io 403s a `curl/*` User-Agent, which is what nixpkgs' fetchurl
+      # sends — so every crate FOD in the vendor closure fails to download.
+      # See scripts/ci-prefetch-crates.sh for the measurement and why
+      # NIX_CURL_FLAGS does not reach the builder. Idempotent; a no-op once the
+      # crates are cached or substituted.
+      - run: sh scripts/ci-prefetch-crates.sh
       - run: nix build .#osfacts --no-link -L
 
   live-oracle:
