@@ -42,15 +42,17 @@ osfacts_drv=$(nix eval --raw "${flake_root}#osfacts.drvPath")
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
-# Collect first, then loop — a `while read` on the right of a pipe runs in a
-# subshell, where `set -e` kills only that subshell and the script exits 0 with
-# the work half done. A failed fetch must fail the CI step, not be swallowed.
-mapfile -t crate_drvs < <(
-  nix-store --query --requisites "$osfacts_drv" | grep 'crate-.*\.tar\.gz\.drv$' || true
-)
+# Collect to a FILE first, then loop over it — a `while read` on the right of a
+# pipe runs in a subshell, where `set -e` kills only that subshell and the
+# script exits 0 with the work half done. A failed fetch must fail the CI step,
+# not be swallowed. (A file rather than `mapfile`: macOS runners ship bash 3.2,
+# which has no `mapfile`.)
+list="$tmpdir/crate-drvs"
+nix-store --query --requisites "$osfacts_drv" | grep 'crate-.*\.tar\.gz\.drv$' > "$list" || true
 
+total=$(wc -l < "$list" | tr -d ' ')
 prefetched=0
-for cdrv in "${crate_drvs[@]}"; do
+while IFS= read -r cdrv; do
   [ -n "$cdrv" ] || continue
   out=$(nix-store --query --outputs "$cdrv")
   if nix-store --check-validity "$out" 2>/dev/null; then
@@ -76,6 +78,6 @@ for cdrv in "${crate_drvs[@]}"; do
   nix-store --add-fixed sha256 "$tmp" >/dev/null
   echo "prefetched: $(basename "$out")"
   prefetched=$((prefetched + 1))
-done
+done < "$list"
 
-echo "prefetched $prefetched crate(s); ${#crate_drvs[@]} in closure"
+echo "prefetched $prefetched crate(s); $total in closure"
