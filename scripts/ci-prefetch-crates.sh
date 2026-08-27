@@ -33,6 +33,12 @@
 # 0.2.12` splits into name `wasip2-1.0.4+wasi` and version `0.2.12`, which 404s.
 # The derivation already knows the answer, so it is asked.
 
+#
+# BOTH CI lanes run this, because both build `.#osfacts` and each gets its own
+# runner with its own empty store: `hermetic` builds it directly, `live-oracle`
+# builds it again to get a binary to point at a real host. A green hermetic does
+# not warm live-oracle's store.
+
 set -euo pipefail
 
 UA='Mozilla/5.0'
